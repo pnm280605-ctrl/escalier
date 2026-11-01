@@ -6386,9 +6386,12 @@ const STANDALONE=!CL;
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function lsSet(k,v){try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,v);}catch(e){}}
 function gemKey(){return STANDALONE?(lsGet("escalier.gemkey")||CFG.gemini||""):"";}
-function aiName(){return SAMPLE?"Claude":gemKey()?"Gemini":"AI";}
-function aiAvailable(){return !!SAMPLE||!!gemKey();}
-function noAiMsg(){return STANDALONE?"Chưa có AI chấm bài. Vào Hồ sơ → AI chấm bài, dán khóa Gemini miễn phí để bật.":"Tính năng AI chỉ chạy khi mở trang này trong Claude (đã đăng nhập).";}
+function aiName(){return SAMPLE?"Claude":(gemKey()||sharedAI())?"Gemini":"AI";}
+/* AI chung của app: gọi Gemini qua Firebase AI Logic, không cần khóa của người học. Chỉ dành cho người đã đăng nhập. */
+function sharedAIcfg(){return STANDALONE&&CFG.sharedAI!==false&&typeof fbConfig==="function"&&!!fbConfig();}
+function sharedAI(){return sharedAIcfg()&&typeof FB!=="undefined"&&!!FB.user;}
+function aiAvailable(){return !!SAMPLE||!!gemKey()||sharedAI();}
+function noAiMsg(){if(!STANDALONE)return "Tính năng AI chỉ chạy khi mở trang này trong Claude (đã đăng nhập).";if(sharedAIcfg())return "Hãy đăng nhập (Hồ sơ → Tài khoản & sao lưu) để dùng AI chấm bài chung của app. Hoặc dán khóa Gemini riêng ở Hồ sơ → AI chấm bài.";return "Chưa có AI chấm bài. Vào Hồ sơ → AI chấm bài, dán khóa Gemini miễn phí để bật.";}
 function parseJSONloose(t){t=String(t||"").trim().replace(/^```(?:json)?\s*/i,"").replace(/```\s*$/,"");const a=t.indexOf("{"),b=t.lastIndexOf("}");if(a>=0&&b>a)t=t.slice(a,b+1);return JSON.parse(t);}
 
 /* Gemini: tự tìm mô hình Flash mới nhất mà khóa được dùng */
@@ -6419,6 +6422,57 @@ async function gemGen(parts,{json=false,signal,temp=0.4}={}){
  }
  throw last||{code:"http"};
 }
+/* ===== AI chung qua Firebase AI Logic (Gemini Developer API, gói miễn phí Spark) ===== */
+const FBAI_V="12.0.0";
+const FBAI={mod:null,app:null,models:null,p:null};
+const FBAI_MODELS=["gemini-flash-latest","gemini-2.5-flash","gemini-flash-lite-latest","gemini-2.5-flash-lite","gemini-2.0-flash"];
+function sharedDailyMax(){const n=Number(CFG.sharedDaily);return n>0?n:80;}
+function sharedUsed(){try{const o=JSON.parse(lsGet("escalier.aiuse")||"{}");return o.d===todayKey()?o.n||0:0;}catch(e){return 0;}}
+function sharedCount(){lsSet("escalier.aiuse",JSON.stringify({d:todayKey(),n:sharedUsed()+1}));}
+function todayKey(){const d=new Date();return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate();}
+async function fbAI(){
+ if(FBAI.mod)return FBAI;
+ if(!FBAI.p)FBAI.p=(async()=>{
+  const b="https://www.gstatic.com/firebasejs/"+FBAI_V+"/";
+  const [appM,aiM]=await Promise.all([import(b+"firebase-app.js"),import(b+"firebase-ai.js")]);
+  let app;try{app=appM.getApp("escalier-ai");}catch(e){app=appM.initializeApp(fbConfig(),"escalier-ai");}
+  FBAI.app=app;FBAI.ai=aiM.getAI(app,{backend:new aiM.GoogleAIBackend()});FBAI.mod=aiM;return FBAI;
+ })().catch(e=>{FBAI.p=null;throw {code:"http",message:"Không tải được thư viện AI. Kiểm tra mạng rồi thử lại."};});
+ return FBAI.p;
+}
+function sharedErr(e){
+ const m=String((e&&e.message)||e||"");
+ if(/429|quota|RESOURCE_EXHAUSTED|rate/i.test(m))return {code:"rate_limited",message:m,retry:true};
+ if(/404|not found|is not supported|NOT_FOUND/i.test(m))return {code:"no_model",message:m,retry:true};
+ if(/503|UNAVAILABLE|overloaded/i.test(m))return {code:"http",message:m,retry:true};
+ if(/api-not-enabled|has not been used|disabled|PERMISSION_DENIED|403/i.test(m))return {code:"shared_off",message:m};
+ if(/SAFETY|blocked/i.test(m))return {code:"empty",message:"AI từ chối trả lời bài này (bộ lọc an toàn)."};
+ return {code:"http",message:m};
+}
+async function sharedGen(prompt,{json=false,signal,audio,temp=0.4}={}){
+ if(sharedUsed()>=sharedDailyMax())throw {code:"shared_daily"};
+ const F=await fbAI();
+ const saved=lsGet("escalier.aimodel");
+ const list=saved?[saved].concat(FBAI_MODELS.filter(x=>x!==saved)):FBAI_MODELS.slice();
+ const parts=[{text:prompt}];if(audio)parts.push({inlineData:{mimeType:audio.type,data:audio.b64}});
+ let last;
+ for(const name of list){
+  if(signal&&signal.aborted)throw {code:"cancelled"};
+  const model=F.mod.getGenerativeModel(F.ai,{model:name,generationConfig:Object.assign({temperature:temp},json?{responseMimeType:"application/json"}:{})});
+  try{
+   const job=model.generateContent(parts);
+   const r=await (signal?Promise.race([job,new Promise((_,rej)=>signal.addEventListener("abort",()=>rej({code:"cancelled"}),{once:true}))]):job);
+   const t=r.response.text();
+   if(!t){last={code:"empty",message:"AI không trả lời (có thể bị bộ lọc an toàn chặn)."};continue;}
+   sharedCount();if(saved!==name)lsSet("escalier.aimodel",name);FBAI.used=name;return t;
+  }catch(e){
+   if(e&&e.code==="cancelled")throw e;
+   last=sharedErr(e);if(saved===name)lsSet("escalier.aimodel",null);
+   if(!last.retry)break;
+  }
+ }
+ throw last||{code:"http"};
+}
 /* Gọi AI chung: trả về chuỗi, hoặc đối tượng JSON khi json:true */
 async function aiCall(prompt,{json=false,tier="default",signal,onText,audio}={}){
  await SAMPLE_P;
@@ -6430,15 +6484,18 @@ async function aiCall(prompt,{json=false,tier="default",signal,onText,audio}={})
   const parts=[{text:prompt}];if(audio)parts.push({inline_data:{mime_type:audio.type,data:audio.b64}});
   const t=await gemGen(parts,{json,signal});if(onText)onText({text:t});return json?parseJSONloose(t):t;
  }
+ if(sharedAI()){
+  const t=await sharedGen(prompt,{json,signal,audio});if(onText)onText({text:t});return json?parseJSONloose(t):t;
+ }
  throw {code:"no_ai"};
 }
-function aiErrMsg(e){const c=e&&e.code;if(c==="no_ai")return noAiMsg();if(c==="rate_limited")return "AI đang quá tải hoặc bạn đã dùng hết lượt miễn phí hôm nay. Thử lại sau ít phút.";if(c==="bad_key")return "Khóa Gemini không hợp lệ. Kiểm tra lại ở Hồ sơ → AI chấm bài.";if(c==="cancelled"||(e&&e.name==="AbortError"))return "Đã dừng.";if(["not_granted","sampling_disabled","not_declared","capability_disabled","capability_removed"].includes(c))return "Tính năng AI chưa được bật cho trang này.";return "Chưa gọi được AI lần này"+(e&&e.message?" ("+e.message+")":"")+". Thử lại nhé.";}
+function aiErrMsg(e){const c=e&&e.code;if(c==="no_ai")return noAiMsg();if(c==="rate_limited")return "AI đang quá tải hoặc bạn đã dùng hết lượt miễn phí hôm nay. Thử lại sau ít phút.";if(c==="bad_key")return "Khóa Gemini không hợp lệ. Kiểm tra lại ở Hồ sơ → AI chấm bài.";if(c==="shared_daily")return "Hôm nay bạn đã dùng hết "+sharedDailyMax()+" lượt AI chung trên máy này. Mai dùng tiếp, hoặc dán khóa Gemini riêng ở Hồ sơ → AI chấm bài.";if(c==="shared_off")return "AI chung chưa bật trong Firebase (Firebase AI Logic → Get started → Gemini Developer API).";if(c==="no_model")return "Không tìm thấy mô hình Gemini dùng được. Thử lại sau.";if(c==="cancelled"||(e&&e.name==="AbortError"))return "Đã dừng.";if(["not_granted","sampling_disabled","not_declared","capability_disabled","capability_removed"].includes(c))return "Tính năng AI chưa được bật cho trang này.";return "Chưa gọi được AI lần này"+(e&&e.message?" ("+e.message+")":"")+". Thử lại nhé.";}
 
 /* ===== Micro: chỉ dùng được ở bản riêng (trong Claude, trang không được phép dùng micro) ===== */
 const SRC=typeof window!=="undefined"?(window.SpeechRecognition||window.webkitSpeechRecognition):null;
 function canDictate(){return STANDALONE&&!!SRC;}
 function canRecord(){return STANDALONE&&!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);}
-function micUsable(){return canDictate()||(canRecord()&&!!gemKey());}
+function micUsable(){return canDictate()||(canRecord()&&(!!gemKey()||sharedAI()));}
 function micNote(){return STANDALONE?(micUsable()?"":"Trình duyệt này chưa hỗ trợ nhận giọng nói. Hãy dùng Safari (iPhone) hoặc Chrome, hoặc thêm khóa Gemini.") :"Trong app Claude, trang không được dùng micro. Mở bản riêng của Escalier để ghi âm và chấm giọng nói.";}
 /* Nhận dạng giọng nói trực tiếp (Web Speech API). onText(finalText, interimText) */
 function startDictation(onText,onEnd){
@@ -6547,12 +6604,16 @@ function bindAccount(){
 /* Khóa Gemini (bản riêng) */
 function aiCardHTML(){
  if(!STANDALONE)return "";
- const k=gemKey();
- return `<div class="card acct"><div class="eyebrow">AI chấm bài (Gemini miễn phí)</div><b>${k?"Đã bật · "+esc(k.slice(0,6))+"…"+esc(k.slice(-4)):"Chưa bật"}</b><p class="muted" style="font-size:13.5px;margin:4px 0 10px">AI chấm bài viết, bài nói, làm giám khảo hỏi đáp và giải thích câu sai. Lấy khóa miễn phí tại <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> (đăng nhập Google → Create API key), rồi dán vào đây. Khóa chỉ lưu trên máy này. Gói miễn phí có giới hạn lượt mỗi ngày, và Google có thể dùng nội dung gửi lên để cải thiện dịch vụ.</p>
- <div style="display:flex;gap:8px;flex-wrap:wrap"><input id="gem-key" type="password" class="vsel" style="flex:1;min-width:200px;width:auto" placeholder="Dán khóa API Gemini (AIza…)" value=""><button class="btn sm" id="gem-save">Lưu & kiểm tra</button>${k?`<button class="btn ghost sm" id="gem-del">Xóa khóa</button>`:""}</div><p class="muted" id="gem-msg" style="font-size:13px;margin:8px 0 0"></p></div>`;
+ const k=gemKey(),sh=sharedAIcfg();
+ const shBlock=sh?`<div class="ai-shared" style="margin:6px 0 12px;padding:10px 12px;border-radius:12px;background:var(--green-soft)"><b>${FB.user?"AI chung của app: đã bật":"AI chung của app: cần đăng nhập"}</b><div class="muted" style="font-size:13px;margin-top:2px">${FB.user?`Không cần khóa riêng. Mỗi máy dùng tối đa ${sharedDailyMax()} lượt/ngày (hôm nay đã dùng ${sharedUsed()}).`:"Đăng nhập ở thẻ « Tài khoản & sao lưu » phía trên là dùng được AI chấm bài, không cần khóa."}</div>${FB.user?`<button class="btn ghost sm" id="ai-test" style="margin-top:8px">Thử AI chung</button><span class="muted" id="ai-test-msg" style="font-size:13px;margin-left:8px"></span>`:""}</div>`:"";
+ return `<div class="card acct"><div class="eyebrow">AI chấm bài (Gemini miễn phí)</div><b>${k?"Khóa riêng: đã bật · "+esc(k.slice(0,6))+"…"+esc(k.slice(-4)):sh&&FB.user?"Đang dùng AI chung":"Chưa bật"}</b><p class="muted" style="font-size:13.5px;margin:4px 0 6px">AI chấm bài viết, bài nói, làm giám khảo hỏi đáp và giải thích câu sai.</p>${shBlock}
+ <details${sh?"":" open"}><summary class="linkbtn" style="cursor:pointer">${sh?"Dùng khóa Gemini riêng (không bắt buộc)":"Dán khóa Gemini"}</summary><p class="muted" style="font-size:13px;margin:6px 0 8px">Lấy khóa miễn phí tại <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> (đăng nhập Google → Create API key). Khóa chỉ lưu trên máy này; có khóa riêng thì app dùng khóa đó trước, không tốn lượt chung.</p>
+ <div style="display:flex;gap:8px;flex-wrap:wrap"><input id="gem-key" type="password" class="vsel" style="flex:1;min-width:200px;width:auto" placeholder="Dán khóa API Gemini (AIza…)" value=""><button class="btn sm" id="gem-save">Lưu & kiểm tra</button>${k?`<button class="btn ghost sm" id="gem-del">Xóa khóa</button>`:""}</div><p class="muted" id="gem-msg" style="font-size:13px;margin:8px 0 0"></p></details>
+ <p class="muted" style="font-size:12px;margin:10px 0 0">Gói miễn phí có giới hạn lượt mỗi ngày, và Google có thể dùng nội dung gửi lên để cải thiện dịch vụ. Đừng viết thông tin cá nhân nhạy cảm vào bài.</p></div>`;
 }
 function bindAiCard(){
  const s=$("#gem-save");if(s)s.onclick=async()=>{const v=$("#gem-key").value.trim();const msg=$("#gem-msg");if(!v){msg.textContent="Dán khóa vào ô trước.";return;}msg.textContent="Đang kiểm tra khóa…";try{const ms=await gemModels(v,true);if(!ms.length)throw new Error("Khóa không có mô hình Gemini nào.");lsSet("escalier.gemkey",v);msg.textContent="Khóa hoạt động. Mô hình: "+ms[0]+".";toast("Đã bật AI chấm bài.");setTimeout(renderView,900);}catch(e){msg.textContent="Khóa chưa dùng được: "+(e.message||e);}};
+ const at=$("#ai-test");if(at)at.onclick=async()=>{const mm=$("#ai-test-msg");at.disabled=true;mm.textContent="Đang thử…";try{const t=await sharedGen("Réponds uniquement par le mot : OK");mm.textContent="Hoạt động ("+(FBAI.used||"Gemini")+"): "+t.trim().slice(0,20);}catch(e){mm.textContent=aiErrMsg(e);}at.disabled=false;};
  const d=$("#gem-del");if(d)d.onclick=()=>{lsSet("escalier.gemkey",null);lsSet("escalier.gemmodels",null);GEM_MODELS=null;toast("Đã xóa khóa.");renderView();};
 }
 /* ===== Chấm bài viết / nói bằng AI (Claude hoặc Gemini) ===== */

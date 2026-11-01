@@ -1,6 +1,4 @@
-/* Cấu hình Escalier (bản riêng).
-   1) Đăng nhập & sao lưu: dán khối firebaseConfig lấy từ Firebase (xem HUONG-DAN.md) vào chỗ firebase: null
-   2) AI chấm bài: KHÔNG nên dán khóa Gemini ở đây nếu kho GitHub để công khai; mỗi người học tự dán khóa trong app (Hồ sơ → AI chấm bài). */
+/* Cấu hình Escalier (bản riêng). */
 window.ESCALIER_CONFIG = {
   firebase: {
     apiKey: "AIzaSyAtvLpOhFhL32GXyyGVxn5adwXGVqDx5BY",
@@ -11,5 +9,7 @@ window.ESCALIER_CONFIG = {
     appId: "1:854619029516:web:916677f44a47a78e99ae29",
     measurementId: "G-5FTD2GJYZ4"
   },
-  gemini: ""
+  sharedAI: true,    // AI chấm bài chung qua Firebase AI Logic (người học chỉ cần đăng nhập)
+  sharedDaily: 80,   // số lượt AI chung tối đa mỗi máy mỗi ngày
+  gemini: ""         // để trống: không dán khóa Gemini vào đây vì kho GitHub công khai
 };
