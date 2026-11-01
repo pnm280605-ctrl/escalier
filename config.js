@@ -13,6 +13,3 @@ window.ESCALIER_CONFIG = {
   },
   gemini: ""
 };
-  firebase: null,
-  gemini: ""
-};
