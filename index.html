@@ -499,6 +499,15 @@ textarea:focus{border-color:var(--blue);outline:none}
 
 @media (max-width:760px){.games{grid-template-columns:1fr 1fr;gap:10px}.game{padding:12px}.game .g-d{display:none}.game .g-t b{font-size:15px}.game .g-ic{width:36px;height:36px}}
 @media (max-width:760px){.game:first-child{grid-column:1/-1}}
+.goal-strip{display:flex;align-items:center;gap:12px;background:var(--surface);border:2px solid var(--line);border-radius:18px;padding:12px 16px;margin:14px 0 0;box-shadow:0 3px 0 var(--line)}
+.goal-strip.done{border-color:var(--green);background:var(--green-soft)}
+.goal-strip .gs-ic{width:34px;height:34px;display:inline-flex;color:var(--gold-d)}
+.gs-path{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}
+.gs-lv{display:inline-flex;align-items:center;gap:3px;font-family:var(--f-display);font-weight:700;font-size:14px;padding:3px 10px;border-radius:999px;border:2px solid var(--line);color:var(--muted)}
+.gs-lv svg{width:12px;height:12px}
+.gs-lv.open{border-color:var(--c);color:var(--c)}
+.gs-lv.tg{border-style:dashed;border-color:var(--c);color:var(--c)}
+.gs-test{display:inline-flex;width:18px;height:18px;color:var(--gold-d);opacity:.85}
 </style>
 </head><body>
 
@@ -5502,11 +5511,11 @@ const bandOf=lv=>lv<"B"?0:lv<"C"?1:2;
 const LVNAME={A1:"Khởi đầu",A2:"Sơ cấp",B1:"Trung cấp",B2:"Trung cao cấp",C1:"Cao cấp",C2:"Thành thạo"};
 
 /* ===== Lưu tiến độ ===== */
-const DEF={v:1,xp:0,streak:0,best:0,lastDay:null,goal:20,xpLog:{},done:{},mistakes:{},history:[],exam:"tcf",level:"A2",rate:0.95,accent:"fr",voice:null,theme:"light",onboarded:false,seen:{},plan:null,ts:0};
+const DEF={v:1,xp:0,streak:0,best:0,lastDay:null,goal:20,xpLog:{},done:{},mistakes:{},history:[],exam:"tcf",level:"A2",rate:0.95,accent:"fr",voice:null,theme:"light",onboarded:false,seen:{},plan:null,target:null,ts:0};
 const LKEY="escalier.v1";
 function clone(o){return JSON.parse(JSON.stringify(o));}
 function loadLocal(){try{const s=localStorage.getItem(LKEY);if(s)return Object.assign(clone(DEF),JSON.parse(s));}catch(e){}return clone(DEF);}
-function normP(o){if(typeof o.maxLv!=="number")o.maxLv=Math.max(0,LEVELS.indexOf(o.level));if(!o.tests||typeof o.tests!=="object")o.tests={};if(!o.vw||typeof o.vw!=="object")o.vw={};return o;}
+function normP(o){if(typeof o.maxLv!=="number")o.maxLv=Math.max(0,LEVELS.indexOf(o.level));if(!o.tests||typeof o.tests!=="object")o.tests={};if(!o.vw||typeof o.vw!=="object")o.vw={};if(!LEVELS.includes(o.target))o.target=LEVELS[Math.min(5,Math.max(o.maxLv,LEVELS.indexOf(o.level))+1)];return o;}
 let P=normP(loadLocal());
 function saveLocal(){try{localStorage.setItem(LKEY,JSON.stringify(P));}catch(e){}}
 const CL=(window.claude&&typeof window.claude.use==="function")?window.claude:null;
@@ -5610,25 +5619,52 @@ function stopSpeech(){SPK_ID++;clearTimeout(SPK_T);if(HAS_TTS)try{speechSynthesi
 /* Mức tốc độ lưu trong P.rate → tốc độ đọc thật (đã giảm cho dễ nghe) */
 const RATE_MAP={0.6:0.5,0.75:0.62,0.95:0.76,1.1:0.9};
 function ttsRate(slow){const base=slow?0.52:(RATE_MAP[P.rate]||0.76);return Math.max(0.45,Math.min(1.2,IOS?base*0.9:base));}
+/* Giọng bị lỗi trong phiên này (không phát ra tiếng) → bỏ qua, thử giọng khác */
+const TTS_BAD=new Set();let TTS_FAILS=0,TTS_WARNED=false,TTS_ONSTART=false;
+function vKey(v){return v?(v.voiceURI||v.name):"";}
+function ttsCandidates(g){
+ const first=g?voiceFor(g):VOICE;const list=[];
+ const add=v=>{if(v&&!TTS_BAD.has(vKey(v))&&!list.includes(v))list.push(v);};
+ add(first);FR_VOICES.filter(v=>v.localService&&!isBadVoice(v)).forEach(add);FR_VOICES.filter(v=>!isBadVoice(v)).forEach(add);
+ list.push(null);/* cuối cùng: không chọn giọng, chỉ đặt lang=fr */
+ return list;
+}
+function ttsWarn(){if(TTS_WARNED)return;TTS_WARNED=true;toast("Máy chưa phát được giọng đọc. Thử tăng âm lượng, tắt chế độ im lặng, hoặc mở lại app. Có thể bấm « Afficher la transcription » để đọc lời.");}
 function speak(text,slow){if(!HAS_TTS)return false;try{
- if(!VOICE)pickVoice();
+ pickVoice();
  if(noFrVoice())warnNoFr();
  const raw=String(text||""),dialog=/^\s*[FH]\s*:/m.test(raw);
  let parts=[];
  if(dialog){raw.split(/\n+/).forEach(l=>{const m=/^\s*([FH])\s*:\s*(.*)$/.exec(l);const g=m?m[1]:"F",tx=frSpeech(m?m[2]:l);chunks(tx).forEach(c=>parts.push({t:c,g}));});}
  else chunks(frSpeech(raw)).forEach(c=>parts.push({t:c,g:null}));
  if(!parts.length)return false;
- clearTimeout(SPK_T);const busy=speechSynthesis.speaking||speechSynthesis.pending;speechSynthesis.cancel();
+ clearTimeout(SPK_T);const busy=speechSynthesis.speaking||speechSynthesis.pending||speechSynthesis.paused;
+ try{speechSynthesis.cancel();}catch(e){}
  const id=++SPK_ID;
- /* Đọc lần lượt từng câu (không xếp hàng một lúc) vì iOS hay bỏ qua giọng và tốc độ của các câu xếp hàng sau */
- const one=i=>{if(id!==SPK_ID||i>=parts.length)return;const pt=parts[i],v=pt.g?voiceFor(pt.g):VOICE;const u=new SpeechSynthesisUtterance(pt.t);u.lang=v&&/^fr/i.test(v.lang)?v.lang:(P.accent==="ca"?"fr-CA":"fr-FR");if(v&&/^fr/i.test(v.lang))u.voice=v;u.rate=ttsRate(slow);u.pitch=pt.g&&(!v||v===VOICE)&&pt.g==="H"?0.8:1;u.volume=1;
-  let done=false;const next=()=>{if(done)return;done=true;clearTimeout(u._t);setTimeout(()=>one(i+1),120);};
-  u.onend=next;u.onerror=e=>{if(e&&(e.error==="interrupted"||e.error==="canceled"))return;next();};
-  u._t=setTimeout(()=>{if(!speechSynthesis.speaking)next();},pt.t.length*120+4000);
-  UTTS=[u];speechSynthesis.speak(u);};
+ /* Đọc lần lượt từng câu; nếu một giọng không phát ra tiếng (lỗi hoặc không bắt đầu sau vài giây) thì thử giọng khác */
+ const one=(i,tried)=>{if(id!==SPK_ID||i>=parts.length)return;
+  const pt=parts[i];tried=tried||new Set();
+  const v=ttsCandidates(pt.g).find(c=>!tried.has(c?vKey(c):"_none"));
+  if(v===undefined){TTS_FAILS++;ttsWarn();setTimeout(()=>one(i+1),120);return;}
+  tried.add(v?vKey(v):"_none");
+  const u=new SpeechSynthesisUtterance(pt.t);u.lang=v&&/^fr/i.test(v.lang)?v.lang:(P.accent==="ca"?"fr-CA":"fr-FR");if(v)u.voice=v;
+  u.rate=ttsRate(slow);u.pitch=pt.g==="H"&&(!v||v===VOICE)?0.8:1;u.volume=1;
+  let done=false,started=false;
+  const finish=()=>{clearTimeout(u._t);clearTimeout(u._s);};
+  const next=()=>{if(done)return;done=true;finish();TTS_FAILS=0;setTimeout(()=>one(i+1),120);};
+  const retry=()=>{if(done)return;done=true;finish();if(v)TTS_BAD.add(vKey(v));if(v===VOICE)VOICE=null;try{speechSynthesis.cancel();}catch(e){}if(id===SPK_ID)setTimeout(()=>one(i,tried),150);};
+  const t0=Date.now();
+  u.onstart=()=>{started=true;TTS_ONSTART=true;clearTimeout(u._s);if(v&&!pt.g&&v!==VOICE)VOICE=v;};
+  u.onend=()=>{if(started||Date.now()-t0>700||pt.t.length<3)next();else retry();};
+  u.onerror=e=>{if(e&&(e.error==="interrupted"||e.error==="canceled"))return;if(started)next();else retry();};
+  u._s=setTimeout(()=>{if(!started&&!done)retry();},IOS?4500:3500);
+  u._t=setTimeout(()=>{if(!speechSynthesis.speaking)next();},pt.t.length*130+6000);
+  UTTS=[u];try{speechSynthesis.resume();}catch(e){}speechSynthesis.speak(u);};
  const go=()=>one(0);
- if(busy)SPK_T=setTimeout(go,80);else go();
+ if(busy)SPK_T=setTimeout(go,120);else go();
  return true;}catch(e){return false;}}
+/* Khi quay lại app từ nền: đánh thức bộ đọc và làm mới danh sách giọng */
+if(HAS_TTS){document.addEventListener("visibilitychange",()=>{if(!document.hidden){try{speechSynthesis.cancel();speechSynthesis.resume();}catch(e){}pickVoice();}});}
 
 /* ===== Khung giao diện ===== */
 const NAV=[["learn","Học","path"],["plan","Cấp tốc","bolt"],["practice","Luyện tập","dumbbell"],["vocab","Từ vựng","book"],["exam","Đề thi","exam"],["profile","Hồ sơ","user"]];
@@ -5682,7 +5718,7 @@ function lvCount(lv){let d=0,t=0;NODES[lv].forEach(u=>u.nodes.forEach(n=>{t++;if
 function viewLearn(){
  const lv=P.level,C=COURSE[lv],U=NODES[lv];let idx=0,foundCur=false,prev=null;
  const {d:doneCount,t:total}=lvCount(lv);
- let html=`<div class="level-hero" style="${lvStyle(lv)}"><div class="level-badge">${lv}</div><div style="min-width:0;flex:1"><div class="eyebrow">Trình độ ${LVNAME[lv]} · ${NCLC[lv]}</div><h1>${esc(C.title)}</h1><p>${esc(C.desc)}</p><div class="prog" style="margin-top:10px;max-width:360px"><i style="width:${doneCount/total*100}%"></i></div><div class="muted tnum" style="font-size:12px;margin-top:4px">${doneCount}/${total} bài đã xong · ${U.length} chương</div></div></div>${testCardHTML(lv)}`;
+ let html=`<div class="level-hero" style="${lvStyle(lv)}"><div class="level-badge">${lv}</div><div style="min-width:0;flex:1"><div class="eyebrow">Trình độ ${LVNAME[lv]} · ${NCLC[lv]}</div><h1>${esc(C.title)}</h1><p>${esc(C.desc)}</p><div class="prog" style="margin-top:10px;max-width:360px"><i style="width:${doneCount/total*100}%"></i></div><div class="muted tnum" style="font-size:12px;margin-top:4px">${doneCount}/${total} bài đã xong · ${U.length} chương</div></div></div>${goalStripHTML()}${testCardHTML(lv)}`;
  U.forEach((u,ui)=>{
   const ud=u.nodes.filter(n=>P.done[n.id]).length;
   html+=`<div class="unit-head" style="${lvStyle(lv)}"><div style="min-width:0"><div class="eyebrow">Chặng ${ui+1} · ${ud}/${u.nodes.length} bài</div><h2>${esc(u.title).replace(/ ([!?:;»])/g,"&nbsp;$1")}</h2>${u.goal?`<p class="unit-goal">${esc(u.goal)}</p>`:""}</div><button data-tip="${ui}">${icon("book")}Ngữ pháp</button></div><div class="path" style="${lvStyle(lv)}">`;
@@ -5791,6 +5827,7 @@ function viewProfile(){
  <div class="section-title"><h2>Cài đặt</h2></div>
  <div class="card" style="display:flex;flex-direction:column;gap:16px">
   <div class="card-row" style="justify-content:space-between;flex-wrap:wrap"><div><b>Giao diện</b><div class="muted" style="font-size:13px">Mặc định hồng pastel, kể cả khi máy đang để chế độ tối</div></div>${seg("theme",[["light","Hồng sáng"],["dark","Tối"],["auto","Theo máy"]],P.theme||"light")}</div>
+  <div class="card-row" style="justify-content:space-between;flex-wrap:wrap"><div><b>Trình độ và mục tiêu</b><div class="muted" style="font-size:13px">Đã mở đến ${LEVELS[P.maxLv]} · mục tiêu ${esc(P.target||"")}</div></div><button class="btn ghost sm" data-replace>Chọn lại</button></div>
   <div class="card-row" style="justify-content:space-between;flex-wrap:wrap"><div><b>Mục tiêu mỗi ngày</b><div class="muted" style="font-size:13px">Mỗi bài học khoảng 10–15 XP</div></div>${seg("goal",[[10,"10"],[20,"20"],[30,"30"],[50,"50"]],P.goal)}</div>
   <div class="card-row" style="justify-content:space-between;flex-wrap:wrap"><div><b>Tốc độ giọng đọc</b><div class="muted" style="font-size:13px">Áp dụng cho bài nghe</div></div>${seg("rate",[[0.6,"Rất chậm"],[0.75,"Chậm"],[0.95,"Vừa"],[1.1,"Nhanh"]],P.rate)}</div>
   <div class="card-row" style="justify-content:space-between;flex-wrap:wrap"><div><b>Giọng ưu tiên</b><div class="muted" style="font-size:13px">${HAS_TTS?"Phụ thuộc giọng có sẵn trên máy bạn":"Trình duyệt này không có giọng đọc"}</div></div>${seg("accent",[["fr","Pháp"],["ca","Canada"]],P.accent)}</div>
@@ -5804,6 +5841,7 @@ function viewProfile(){
 /* ===== Gắn sự kiện cho màn hình ===== */
 function bindView(){
  $$("[data-nudge]").forEach(b=>b.onclick=studyNow);
+ $$("[data-replace]").forEach(b=>b.onclick=()=>welcome(true));
  if(VIEW==="plan")bindPlan();
  if(VIEW==="vocab")bindVocab();
  if(VIEW==="practice")bindGames();
@@ -5869,18 +5907,39 @@ function pickLevel(){
 }
 function lvOpen(l){return LEVELS.indexOf(l)<=P.maxLv;}
 function setLevel(lv){if(!lvOpen(lv)){openTestIntro(LEVELS[P.maxLv],lv);return;}P.level=lv;save();renderAll();window.scrollTo(0,0);}
-function welcome(){
- if(!$("#scrim").hidden)return;
- let ex=P.exam,lv=P.level;
- const draw=()=>openSheet(`<div style="display:flex;justify-content:center">${mascot(100)}</div><h2 style="text-align:center">Chào mừng đến với Escalier!</h2><p class="muted" style="text-align:center;margin-top:0">Từng bậc một, từ A1 đến C2. Chọn kỳ thi và trình độ để bắt đầu.</p>
- <div class="eyebrow">Kỳ thi</div><div class="pick" style="grid-template-columns:repeat(2,minmax(0,1fr))">${Object.keys(EXAMS).map(k=>`<button data-wex="${k}" aria-pressed="${ex===k}"><b>${esc(EXAMS[k].name)}</b></button>`).join("")}</div>
- <div class="eyebrow">Trình độ hiện tại</div><div class="pick cols3">${LEVELS.map(l=>`<button data-wlv="${l}" aria-pressed="${lv===l}" ${EXAMS[ex].levels.includes(l)?"":"disabled"}><b style="color:var(--lv-${l})">${l}</b><span>${LVNAME[l]}</span></button>`).join("")}</div>
- <button class="btn wide" id="w-go">Bắt đầu học</button>`,()=>{
-  $$("[data-wex]").forEach(b=>b.onclick=()=>{ex=b.dataset.wex;const L=EXAMS[ex].levels;if(!L.includes(lv))lv=lv<L[0]?L[0]:L[L.length-1];draw();});
-  $$("[data-wlv]").forEach(b=>b.onclick=()=>{lv=b.dataset.wlv;draw();});
-  $("#w-go").onclick=()=>{P.exam=ex;P.level=lv;P.maxLv=Math.max(P.onboarded?P.maxLv:0,LEVELS.indexOf(lv));P.onboarded=true;save();closeSheet();renderAll();};
- });
+/* Chọn trình độ hiện tại + mục tiêu. Mở khóa đến trình độ hiện tại; lên cao hơn phải qua bài kiểm tra. */
+function passedTop(){let m=-1;LEVELS.forEach((l,i)=>{if(P.tests[l]&&P.tests[l].passed)m=Math.max(m,i+1);});return Math.min(5,m);}
+function welcome(again){
+ if(!again&&!$("#scrim").hidden)return;
+ let ex=P.exam,lv=again?LEVELS[P.maxLv]:P.level,tg=P.target;
+ const fixTg=()=>{const ci=LEVELS.indexOf(lv),opts=LEVELS.filter((l,i)=>i>ci);if(!opts.length){tg=lv;return;}if(LEVELS.indexOf(tg)<=ci)tg=opts.find(l=>EXAMS[ex].levels.includes(l))||opts[0];};
+ fixTg();
+ const draw=()=>{
+  const ci=LEVELS.indexOf(lv),ti=LEVELS.indexOf(tg),pt=again?passedTop():-1,unl=Math.max(ci,pt);
+  const steps=[];for(let i=unl;i<ti;i++)steps.push(LEVELS[i]+" → "+LEVELS[i+1]);
+  const sum=ti<=unl?`Mở khóa từ A1 đến <b>${LEVELS[unl]}</b>. Bạn đã ở trình độ mục tiêu.`:`Mở khóa từ A1 đến <b>${LEVELS[unl]}</b>. Để lên <b>${tg}</b>, bạn cần qua ${steps.length} bài kiểm tra (${steps.join(", ")}), mỗi bài 50 câu, đạt từ 80%.`;
+  const relock=again&&unl<P.maxLv?`<p class="muted" style="font-size:13px;margin:6px 0 0;color:var(--red)">Trình độ ${LEVELS.slice(unl+1,P.maxLv+1).join(", ")} đang mở sẽ khóa lại cho tới khi bạn qua bài kiểm tra.</p>`:"";
+  openSheet(`${again?"":`<div style="display:flex;justify-content:center">${mascot(100)}</div>`}<h2 style="text-align:center">${again?"Trình độ và mục tiêu":"Chào mừng đến với Escalier!"}</h2><p class="muted" style="text-align:center;margin-top:0">${again?"Chọn lại trình độ hiện tại và trình độ bạn muốn đạt.":"Từng bậc một, từ A1 đến C2. Chọn kỳ thi, trình độ hiện tại và mục tiêu của bạn."}</p>
+  <div class="eyebrow">Kỳ thi</div><div class="pick" style="grid-template-columns:repeat(2,minmax(0,1fr))">${Object.keys(EXAMS).map(k=>`<button data-wex="${k}" aria-pressed="${ex===k}"><b>${esc(EXAMS[k].name)}</b></button>`).join("")}</div>
+  <div class="eyebrow">Trình độ hiện tại của bạn</div><div class="pick cols3">${LEVELS.map(l=>`<button data-wlv="${l}" aria-pressed="${lv===l}"><b style="color:var(--lv-${l})">${l}</b><span>${LVNAME[l]}</span></button>`).join("")}</div>
+  <div class="eyebrow">Trình độ mục tiêu</div><div class="pick cols3">${LEVELS.map((l,i)=>`<button data-wtg="${l}" aria-pressed="${tg===l}" ${i>ci?"":"disabled"}><b style="color:var(--lv-${l})">${l}${i>ci?" "+icon("target"):""}</b><span>${i>ci?(EXAMS[ex].levels.includes(l)?esc(EXAMS[ex].short)+" "+l:LVNAME[l]):"Đã mở"}</span></button>`).join("")}</div>
+  <div class="card" style="background:var(--surface-2);box-shadow:none;font-size:13.5px;line-height:1.55;margin:4px 0 14px">${icon("lock")} ${sum}${relock}</div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap">${again?`<button class="btn ghost" data-close>Hủy</button>`:""}<button class="btn ${again?"":"wide"}" id="w-go" style="${again?"flex:1":""}">${again?"Lưu":"Bắt đầu học"}</button></div>`,()=>{
+   $$("[data-wex]").forEach(b=>b.onclick=()=>{ex=b.dataset.wex;const L=EXAMS[ex].levels;if(LEVELS.indexOf(tg)<=LEVELS.indexOf(lv)||!L.includes(tg)){const c=L.find(x=>LEVELS.indexOf(x)>LEVELS.indexOf(lv));if(c)tg=c;}fixTg();draw();});
+   $$("[data-wlv]").forEach(b=>b.onclick=()=>{lv=b.dataset.wlv;fixTg();draw();});
+   $$("[data-wtg]").forEach(b=>b.onclick=()=>{tg=b.dataset.wtg;draw();});
+   $("#w-go").onclick=()=>{P.exam=ex;P.maxLv=unl;P.level=LEVELS[unl];P.target=tg;P.onboarded=true;save();closeSheet();VIEW="learn";renderAll();window.scrollTo(0,0);toast(ti>unl?"Đã mở khóa đến "+LEVELS[unl]+". Mục tiêu: "+tg+".":"Đã mở khóa đến "+LEVELS[unl]+".");};
+  });
+ };
  draw();
+}
+/* Dải lộ trình đến mục tiêu, hiện ở màn hình Học */
+function goalStripHTML(){
+ const ti=LEVELS.indexOf(P.target),mx=P.maxLv;if(ti<0)return "";
+ if(mx>=ti)return `<div class="goal-strip done"><span class="gs-ic">${icon("trophy")}</span><div style="flex:1;min-width:0"><b>Đã đạt mục tiêu ${P.target}!</b><div class="muted" style="font-size:13px">Đặt mục tiêu mới để tiếp tục leo bậc.</div></div><button class="btn ghost sm" data-replace>Đặt mục tiêu</button></div>`;
+ const chips=[];for(let i=0;i<=ti;i++){const l=LEVELS[i];if(i<mx)continue;chips.push(`<span class="gs-lv ${i<=mx?"open":""} ${i===ti?"tg":""}" style="--c:var(--lv-${l})">${i<=mx?"":icon("lock")}${l}</span>`);if(i<ti)chips.push(`<span class="gs-test" title="Bài kiểm tra ${l} → ${LEVELS[i+1]}">${icon("trophy")}</span>`);}
+ const left=ti-mx;
+ return `<div class="goal-strip"><div style="flex:1;min-width:0"><div class="eyebrow">Mục tiêu ${esc(P.target)} · còn ${left} bài kiểm tra</div><div class="gs-path">${chips.join("")}</div></div><button class="linkbtn" data-replace style="font-size:13px">Đổi</button></div>`;
 }
 let toastT;function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("on");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("on"),2600);}
 
